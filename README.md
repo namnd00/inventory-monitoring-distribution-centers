@@ -65,7 +65,12 @@
 
 4. **Training in SageMaker**: With the training script ready, the next step was to set up a training job in SageMaker. This was done by defining a PyTorch estimator, specifying the type and number of instances to use for training, and the location of the training data in S3. The estimator was then fit on the training data, which initiated the training job. SageMaker took care of downloading the data from S3, running the training script, and saving the trained model artifacts back to S3.
 
+![train](./ScreenShots/training_jobs.png)
+![train](./ScreenShots/training_jobs.png)
+
+
 5. **Model Evaluation**: After training, the model was evaluated on a separate validation dataset to assess its performance. The accuracy of the model's predictions was used as the main metric.
 
 6. **Deployment**: Finally, the trained model was deployed to a SageMaker endpoint. This makes the model available for online prediction requests. The endpoint can be accessed via an API, making it possible to integrate the model into applications.
 
+![deploy](./ScreenShots/endpoints.png)
