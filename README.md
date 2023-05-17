@@ -1,4 +1,4 @@
-# Operationalizing-Machine-Learning-on-SageMaker
+# Inventory Monitoring at Distribution Centers
 
 ## Project overview
 

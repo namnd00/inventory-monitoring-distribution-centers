@@ -7,6 +7,7 @@ import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
 from torchvision import datasets
+import time
 
 import argparse
 import os
@@ -41,67 +42,78 @@ def test(model, test_loader, criterion):
     logger.info(f"Testing Accuracy: {total_acc}")
 
 
-def train(model, train_loader, validation_loader, criterion, optimizer , eps):
+def train(model, train_loader, validation_loader, criterion, optimizer, max_epochs):
     """Train model function."""
-    epochs=eps
-    best_loss=1e6
-    image_dataset={'train':train_loader, 'valid':validation_loader}
-    loss_counter=0
+    best_loss = float('inf')
+    loss_counter = 0
     
-    for epoch in range(epochs):
+    for epoch in range(max_epochs):
         logger.info(f"Epoch: {epoch}")
+        
+        # Train and validation phases
         for phase in ['train', 'valid']:
-            if phase=='train':
-                model.train()
-            else:
-                model.eval()
+            is_training = phase == 'train'
+            model.train(is_training)
+            data_loader = train_loader if is_training else validation_loader
+            
             running_loss = 0.0
             running_corrects = 0
-
-            for inputs, labels in image_dataset[phase]:
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-
-                if phase=='train':
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+            
+            for inputs, labels in data_loader:
+                optimizer.zero_grad()
+                with torch.set_grad_enabled(is_training):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    
+                    if is_training:
+                        loss.backward()
+                        optimizer.step()
 
                 _, preds = torch.max(outputs, 1)
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
+                running_corrects += torch.sum(preds == labels.data).item()
 
-            epoch_loss = running_loss // len(image_dataset[phase])
-            epoch_acc = running_corrects // len(image_dataset[phase])
-            
-            if phase=='valid':
-                if epoch_loss<best_loss:
-                    best_loss=epoch_loss
-                else:
-                    loss_counter+=1
-
+            epoch_loss = running_loss / len(data_loader.dataset)
+            epoch_acc = running_corrects / len(data_loader.dataset)
 
             logger.info('{} loss: {:.4f}, acc: {:.4f}, best loss: {:.4f}'.format(phase,
                                                                                  epoch_loss,
                                                                                  epoch_acc,
                                                                                  best_loss))
-        if loss_counter==1:
-            break
-        if epoch==0:
-            break
+
+            # Early stopping
+            if phase == 'valid' and epoch_loss < best_loss:
+                best_loss = epoch_loss
+                loss_counter = 0
+            elif phase == 'valid':
+                loss_counter += 1
+                
+            if loss_counter >= 3:
+                logger.info('Stopping early at epoch {}'.format(epoch))
+                return model
+
     return model
+
     
 def net():
     """Network initialization."""
     model = models.resnet50(pretrained=True)
 
+    # Freeze all layers
     for param in model.parameters():
-        param.requires_grad = False
+        param.requires_grad_(False)
 
+    # Modify last fully connected layer
+    num_ftrs = model.fc.in_features
     model.fc = nn.Sequential(
-                   nn.Linear(2048, 128),
+                   nn.Linear(num_ftrs, 128),
                    nn.ReLU(inplace=True),
                    nn.Linear(128, 5))
+
+    # Unfreeze last layer parameters
+    for param in model.fc.parameters():
+      param.requires_grad_(True)
+
     return model
 
 
@@ -111,44 +123,62 @@ def create_data_loaders(data, batch_size):
         transforms.RandomResizedCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        ])
+    ])
 
     test_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        ])
+    ])
 
-    dataset = datasets.ImageFolder(data, transform=test_transform)
-    lengths = [5221, 2611, 2609]
+    dataset = datasets.ImageFolder(data, transform=train_transform)
 
-    train_set, test_set , valid_set = torch.utils.data.random_split(dataset, lengths)
+    # Use random_split to get train, test and validation sets
+    train_set, test_set, valid_set = torch.utils.data.random_split(dataset, [5221, 2611, 2609])
 
-    trainDataloader = torch.utils.data.DataLoader(train_set, batch_size=32, shuffle=True, num_workers=2)
-    testDataloader = torch.utils.data.DataLoader(test_set, batch_size=32, shuffle=False, num_workers=2)
-    validDataloader = torch.utils.data.DataLoader(valid_set, batch_size=32, shuffle=False, num_workers=2)
+    # Use DataLoader with pin_memory=True for faster data transfer to GPU
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    valid_loader = torch.utils.data.DataLoader(valid_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
-    return trainDataloader, testDataloader , validDataloader
+    return train_loader, test_loader, valid_loader
+
 
 def main(args):
     """Main function."""
-    logger.info(f'Hyperparameters are LR: {args.learning_rate}, Batch Size: {args.batch_size}')
-    logger.info(f'Data Paths: {args.data}')
+    # Log hyperparameters and data paths to console
+    logger.info('Hyperparameters are LR: {}, Batch Size: {}'.format(args.learning_rate, args.batch_size))
+    logger.info('Data Paths: {}'.format(args.data))
 
-    train_loader, test_loader, validation_loader=create_data_loaders(args.data, args.batch_size)
-    model=net()
+    # Get dataloaders with specified batch size
+    train_loader, test_loader, validation_loader = create_data_loaders(args.data, args.batch_size)
 
+    # Create model object and move it to device if GPU available
+    model = net()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss(ignore_index=133)
-    eps = args.epochs
-    optimizer = optim.Adam(model.fc.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    logger.info("Starting Model Training")
-    model=train(model, train_loader, validation_loader, criterion, optimizer , eps)
+    # Train and validate model
+    start_time = time.time()
+    model = train(model, train_loader, validation_loader, criterion, optimizer, args.epochs)
+    end_time = time.time()
+    elapsed_time = end_time - start_time
 
-    logger.info("Testing Model")
-    test(model, test_loader, criterion)
+    logger.info('Model training completed in {:.0f}m {:.0f}s'.format(elapsed_time // 60, elapsed_time % 60))
 
-    logger.info("Saving Model")
-    torch.save(model.cpu().state_dict(), os.path.join(args.model_dir, "model.pth"))
+    # Test model on unseen data
+    test_loss, test_accuracy = test(model, test_loader, criterion)
+
+    logger.info('Test Loss: {:.6f}, Test Accuracy: {:.2f}%'.format(test_loss, test_accuracy * 100))
+
+    # Save trained model
+    model_path = os.path.join(args.model_dir, 'model.pth')
+    torch.save(model.cpu().state_dict(), model_path)
+    logger.info('Trained model saved at: {}'.format(model_path))
+
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
